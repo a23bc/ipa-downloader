@@ -4,22 +4,20 @@ import CommonCrypto
 /// High-level authentication service implementing ipatool v1.x's iTunes Store
 /// `authenticate` flow.
 ///
-/// Flow (much simpler than GSA/SRP — no crypto, no ActionSignature):
+/// This is the verified protocol from ipatool v1.0.0–v1.1.4 (Swift sources):
 ///
-/// 1. Fetch anisette headers from local sidecar server.
-/// 2. POST a simple XML plist to `/WebObjects/MZFinance.woa/wa/authenticate`
-///    with body:
-///       appleId, attempt=1, guid, password, rmp=0, why=signIn
-/// 3. Apple responds with one of:
-///    - Success: plist containing `directory-services-id` (DSID), `passwordToken`,
-///      `accountInfo`, and a `mki` (machine key identifier) for subsequent
-///      purchase requests.
-///    - 2FA required: `messageType = "2FARequired"` — request security code.
-///    - Failure: `failureType` + `mmeErrorMessage`.
-///
-/// 4. If 2FA, submit the 6-digit code to the same endpoint with `why=sendCode`.
-///
-/// Reference: github.com/majd/ipatool (v1.x — before SAP was added in v2.x).
+/// 1. POST XML plist to `https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?guid=<GUID>`
+/// 2. Headers: ONLY `User-Agent: Configurator/2.15 ...` + `Content-Type: application/x-www-form-urlencoded`
+///    (yes, the body is XML plist but Content-Type lies — this is ipatool's quirk
+///     that Apple's edge CDN expects. Sending `application/x-apple-plist` → 404/500.)
+///    Do NOT send anisette headers on this request.
+/// 3. Body keys (all strings):
+///    - appleId, attempt="4" (first try) or "2" (with 2FA), createSession="true",
+///      guid=<same as URL>, password, rmp="0", why="signIn"
+/// 4. On `failureType=1` (codeRequired): retry with host `p71-`, attempt="2",
+///    password+code appended.
+/// 5. On `-5000` (invalidCredentials, intermittent): retry same request once.
+/// 6. Success: extract `dsPersonId` (DSID) + `passwordToken` + `accountInfo`.
 @MainActor
 final class AuthService: ObservableObject {
     enum State: Equatable {
@@ -33,7 +31,6 @@ final class AuthService: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var account: AppleAccount?
 
-    private let anisette = AnisetteHeadersProvider.shared
     private let storage = KeychainStore.shared
 
     init() {
@@ -57,46 +54,88 @@ final class AuthService: ObservableObject {
     func login(appleId: String, password: String) async {
         state = .authenticating
         do {
-            try await performLogin(appleId: appleId, password: password)
+            try await performLogin(appleId: appleId, password: password, twoFACode: nil)
         } catch {
             state = .failed(error.localizedDescription)
         }
     }
 
-    private func performLogin(appleId: String, password: String) async throws {
-        // Step 1: Fetch anisette headers.
-        let anisetteHeaders = try await anisette.fetchHeaders()
+    private func performLogin(appleId: String,
+                              password: String,
+                              twoFACode: String?) async throws {
+        // GUID = stable 12-char uppercase hex (fake MAC address).
+        // Derive from a persisted UUID so it's stable across launches.
+        let guid = Self.loadOrCreateGUID()
 
-        // guid = a fake MAC address (uppercase hex, 12 chars). ipatool uses
-        // the device's actual MAC; on iOS we don't have that, so we derive
-        // a stable one from the X-Mme-Device-Id UUID.
-        let deviceID = anisetteHeaders["X-Mme-Device-Id"] ?? UUID().uuidString
-        let guid = Self.deriveGUID(from: deviceID)
+        // First attempt: host p25-, attempt="4", password only.
+        // Second attempt (2FA): host p71-, attempt="2", password+code.
+        let prefix = twoFACode == nil ? "p25" : "p71"
+        let attempt = twoFACode == nil ? "4" : "2"
+        let fullPassword = twoFACode.map { password + $0 } ?? password
 
-        // Step 2: POST to /authenticate
+        let urlString = "https://\(prefix)-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?guid=\(guid)"
+        guard let url = URL(string: urlString) else {
+            throw AuthError.invalidResponse("Invalid URL: \(urlString)")
+        }
+
         let body = Self.buildAuthenticateBody(
             appleId: appleId,
-            password: password,
-            guid: guid
+            attempt: attempt,
+            guid: guid,
+            password: fullPassword
         )
-        var headers = anisetteHeaders
-        headers["Content-Type"] = "application/x-apple-plist"
-        headers["Accept"] = "*/*"
-        headers["Accept-Language"] = "en-us"
-        headers["User-Agent"] = "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6"
 
-        var req = URLRequest(url: URL(string: "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate")!)
+        // ipatool sends ONLY these two headers. Do NOT add anisette headers —
+        // they belong on a different request flow entirely. Adding them here
+        // causes Apple's edge CDN to return random 204/301/403/404/500 errors.
+        var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("Configurator/2.15 (Macintosh; OS X 11.0.0; 16G29) AppleWebKit/2603.3.8",
+                     forHTTPHeaderField: "User-Agent")
+        // CRITICAL: Content-Type is x-www-form-urlencoded even though body is XML plist.
+        // Apple's edge CDN inspects this header before parsing the body.
+        req.setValue("application/x-www-form-urlencoded",
+                     forHTTPHeaderField: "Content-Type")
+        // Leave Accept / Accept-Encoding / Accept-Language to URLSession defaults.
         req.httpBody = body
         req.timeoutInterval = 30
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        // Apple intermittently returns -5000 invalidCredentials on first hit.
+        // ipatool retries the identical request once before failing.
+        var lastErr: Error?
+        for attempt in 1...2 {
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                try parseResponse(data: data, resp: resp, appleId: appleId,
+                                  password: password, guid: guid)
+                return
+            } catch let err as AuthError where err.isCodeRequired() {
+                // 2FA needed — switch to awaiting2FA state.
+                self.account = AppleAccount(appleId: appleId, password: password, guid: guid)
+                self.state = .awaiting2FA
+                return
+            } catch let err as AuthError where err.isInvalidCredentials() {
+                lastErr = err
+                if attempt == 2 { break }
+                // Wait briefly then retry once.
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            } catch {
+                throw error
+            }
+        }
+        throw lastErr ?? AuthError.invalidResponse("Unknown error")
+    }
+
+    /// Parse the iTunes Store /authenticate XML plist response.
+    private func parseResponse(data: Data,
+                                resp: URLResponse,
+                                appleId: String,
+                                password: String,
+                                guid: String) throws {
         guard let http = resp as? HTTPURLResponse else {
             throw AuthError.invalidResponse("non-HTTP response")
         }
-
-        // Parse the plist response.
         guard let plist = try? PropertyListSerialization.propertyList(
             from: data, options: [], format: nil) as? [String: Any] else {
             let bodyPreview = String(data: data.prefix(500), encoding: .utf8) ?? "<binary \(data.count) bytes>"
@@ -107,42 +146,57 @@ final class AuthService: ObservableObject {
                 """)
         }
 
-        // Check for 2FA requirement.
-        if let messageType = plist["messageType"] as? String,
-           messageType.lowercased().contains("2fa") || messageType.lowercased().contains("secondary") {
-            // Persist partial account; will complete after 2FA.
-            self.account = AppleAccount(appleId: appleId, password: password, guid: guid)
-            self.state = .awaiting2FA
-            return
+        // Check for 2FA requirement (failureType=1, customerMessage contains
+        // "verification code" or similar).
+        if let failureType = plist["failureType"] as? String,
+           failureType == "1" {
+            throw AuthError.codeRequired
+        }
+        // Some responses use int.
+        if let failureType = plist["failureType"] as? Int,
+           failureType == 1 {
+            throw AuthError.codeRequired
         }
 
-        // Check for explicit failure.
-        if let failureType = plist["failureType"] as? String, !failureType.isEmpty {
-            let msg = (plist["mmeErrorMessage"] as? String)
-                   ?? (plist["errorMessage"] as? String)
-                   ?? failureType
+        // Other failures.
+        if let failureType = plist["failureType"] as? String, !failureType.isEmpty,
+           failureType != "0" {
+            let customerMsg = (plist["customerMessage"] as? String) ?? ""
+            let mmeMsg = (plist["mmeErrorMessage"] as? String) ?? ""
+            // -5000 = intermittent invalidCredentials (handled by caller retry).
+            if failureType == "-5000" {
+                throw AuthError.invalidCredentials
+            }
             throw AuthError.invalidResponse("""
-                Login failed: \(failureType)
-                \(msg)
+                Login failed: failureType=\(failureType)
+                \(customerMsg)
+                \(mmeMsg)
+                """)
+        }
+        if let failureType = plist["failureType"] as? Int, failureType != 0 {
+            let customerMsg = (plist["customerMessage"] as? String) ?? ""
+            if failureType == -5000 {
+                throw AuthError.invalidCredentials
+            }
+            throw AuthError.invalidResponse("""
+                Login failed: failureType=\(failureType)
+                \(customerMsg)
                 """)
         }
 
-        // Success path: extract DSID + token.
-        guard let dsid = (plist["directory-services-id"] as? String)
-                       ?? ((plist["accountInfo"] as? [String: Any])?["directory-services-id"] as? String) else {
-            // Dump the entire plist so we can see what Apple returned.
+        // Success path.
+        guard let dsid = plist["dsPersonId"] as? String else {
             throw AuthError.invalidResponse("""
-                Login response did not contain DSID.
+                Login response did not contain dsPersonId.
                 Plist keys: \(plist.keys.sorted())
                 Full plist: \(plist)
                 """)
         }
 
-        let passToken = (plist["passwordToken"] as? String)
-                     ?? ((plist["accountInfo"] as? [String: Any])?["passwordToken"] as? String)
-        let firstName = (plist["accountInfo"] as? [String: Any])?["firstName"] as? String
-        let lastName = (plist["accountInfo"] as? [String: Any])?["lastName"] as? String
-        let storeFront = (plist["accountInfo"] as? [String: Any])?["storeFront"] as? String
+        let passToken = plist["passwordToken"] as? String
+        let accountInfo = plist["accountInfo"] as? [String: Any]
+        let firstName = (accountInfo?["address"] as? [String: Any])?["firstName"] as? String
+        let lastName = (accountInfo?["address"] as? [String: Any])?["lastName"] as? String
 
         let acct = AppleAccount(
             appleId: appleId,
@@ -152,7 +206,6 @@ final class AuthService: ObservableObject {
             dsid: dsid,
             guid: guid,
             passToken: passToken,
-            storeFront: storeFront,
             twoFactorVerified: true
         )
         self.account = acct
@@ -179,7 +232,8 @@ final class AuthService: ObservableObject {
         }
         do {
             try await performLogin(appleId: account.appleId,
-                                   password: (account.password ?? "") + code.replacingOccurrences(of: " ", with: ""))
+                                   password: account.password ?? "",
+                                   twoFACode: code.replacingOccurrences(of: " ", with: ""))
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -191,50 +245,71 @@ final class AuthService: ObservableObject {
         storage.deleteAccount()
     }
 
-    // MARK: - Helpers
+    // MARK: - GUID persistence
 
-    /// Derive a 12-char uppercase hex GUID (fake MAC address) from a UUID string.
-    /// This must be stable across launches so Apple sees the same "device".
-    static func deriveGUID(from uuidString: String) -> String {
-        let stripped = uuidString.replacingOccurrences(of: "-", with: "")
-        // Take the first 12 hex chars, uppercase.
-        return String(stripped.prefix(12)).uppercased()
+    /// Load or create a stable 12-char uppercase hex GUID (fake MAC address).
+    /// Persisted in UserDefaults so Apple sees the same "device" across launches.
+    private static let guidKey = "auth.guid"
+    static func loadOrCreateGUID() -> String {
+        if let existing = UserDefaults.standard.string(forKey: guidKey) {
+            return existing
+        }
+        // Generate 6 random bytes, format as 12 uppercase hex chars.
+        var bytes = [UInt8](repeating: 0, count: 6)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 6, &bytes)
+        let guid = bytes.map { String(format: "%02X", $0) }.joined()
+        UserDefaults.standard.set(guid, forKey: guidKey)
+        return guid
     }
 
-    /// Build the XML plist body for `/authenticate`.
-    /// ipatool v1.x uses 6 top-level string keys.
-    static func buildAuthenticateBody(appleId: String, password: String, guid: String) -> Data {
-        let escapedAppleId = appleId
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-        let escapedPassword = password
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
+    /// Build the XML plist body for /authenticate.
+    /// All values are strings (per ipatool).
+    static func buildAuthenticateBody(appleId: String,
+                                       attempt: String,
+                                       guid: String,
+                                       password: String) -> Data {
+        let escapedAppleId = Self.escapeXML(appleId)
+        let escapedPassword = Self.escapeXML(password)
+        let plist: [String: String] = [
+            "appleId":       escapedAppleId,
+            "attempt":       attempt,
+            "createSession": "true",
+            "guid":          guid,
+            "password":      escapedPassword,
+            "rmp":           "0",
+            "why":           "signIn"
+        ]
+        // Serialize as XML plist.
+        return (try? PropertyListSerialization.data(
+            fromPropertyList: plist, format: .xml, options: 0)) ?? Data()
+    }
 
-        let xml = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>appleId</key><string>\(escapedAppleId)</string>
-            <key>attempt</key><string>1</string>
-            <key>guid</key><string>\(guid)</string>
-            <key>password</key><string>\(escapedPassword)</string>
-            <key>rmp</key><string>0</string>
-            <key>why</key><string>signIn</string>
-        </dict>
-        </plist>
-        """
-        return xml.data(using: .utf8) ?? Data()
+    private static func escapeXML(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+         .replacingOccurrences(of: "<", with: "&lt;")
+         .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     enum AuthError: Error, LocalizedError {
         case invalidResponse(String)
+        case codeRequired
+        case invalidCredentials
 
         var errorDescription: String? {
             switch self {
             case .invalidResponse(let msg): return msg
+            case .codeRequired: return "Two-factor authentication required."
+            case .invalidCredentials: return "Invalid credentials (Apple returned -5000)."
             }
+        }
+
+        func isCodeRequired() -> Bool {
+            if case .codeRequired = self { return true }
+            return false
+        }
+        func isInvalidCredentials() -> Bool {
+            if case .invalidCredentials = self { return true }
+            return false
         }
     }
 }
