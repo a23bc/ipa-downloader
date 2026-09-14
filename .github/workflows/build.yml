@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g. v1.0.0)"
+        description: "Version tag (used for artifact name only, e.g. v1.0.0)"
         required: false
         default: "v0.1.0"
+
+# Default GITHUB_TOKEN only needs read permissions for this workflow.
+# We do NOT create a release; the .ipa is uploaded as a workflow artifact.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -86,6 +91,10 @@ jobs:
           mkdir -p output
           mv "$ZIP_NAME" output/
           ls -la output/
+          echo "## Build output" >> $GITHUB_STEP_SUMMARY
+          echo "✅ IPA packaged: \`$ZIP_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download it from the **Artifacts** section below." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -93,11 +102,4 @@ jobs:
           name: IPADownloader-unsigned-${{ github.event.inputs.version }}
           path: output/*.ipa
           retention-days: 30
-
-      - name: (Optional) Create Release
-        if: ${{ github.event.inputs.version != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.version }}
-          files: output/*.ipa
-          generate_release_notes: true
+          if-no-files-found: error
