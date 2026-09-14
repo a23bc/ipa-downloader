@@ -40,7 +40,7 @@ final class AnisetteHeadersProvider: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             guard let http = response as? HTTPURLResponse else {
-                throw AnisetteError.serverError("""
+                throw AnisetteError.serverError(message: """
                     Response was not HTTP (got \(type(of: response))).
                     Request URL: \(url.absoluteString)
                     """)
@@ -49,7 +49,7 @@ final class AnisetteHeadersProvider: ObservableObject {
                 let bodyPreview = String(data: data, encoding: .utf8)?
                     .prefix(500)
                     .replacingOccurrences(of: "\n", with: "\\n") ?? "<binary \(data.count) bytes>"
-                throw AnisetteError.serverError("""
+                throw AnisetteError.serverError(message: """
                     HTTP \(http.statusCode) from \(url.absoluteString)
                     Server returned: \(bodyPreview)
                     """)
@@ -58,7 +58,7 @@ final class AnisetteHeadersProvider: ObservableObject {
                 let bodyPreview = String(data: data, encoding: .utf8)?
                     .prefix(500)
                     .replacingOccurrences(of: "\n", with: "\\n") ?? "<binary \(data.count) bytes>"
-                throw AnisetteError.serverError("""
+                throw AnisetteError.serverError(message: """
                     Response from \(url.absoluteString) was not a JSON object.
                     Body: \(bodyPreview)
                     Expected keys: X-Apple-I-MD, X-Apple-I-MD-M, X-Mme-Device-Id
@@ -77,7 +77,7 @@ final class AnisetteHeadersProvider: ObservableObject {
             throw err
         } catch {
             // URLSession error (connection refused, timeout, DNS failure, etc.)
-            throw AnisetteError.serverError("""
+            throw AnisetteError.serverError(message: """
                 Network error reaching \(url.absoluteString)
                 Error: \(error.localizedDescription)
 

@@ -162,7 +162,7 @@ struct SettingsView: View {
                     Got: \(received.joined(separator: ", "))
                     """)
             }
-        } catch let AnisetteHeadersProvider.AnisetteError.serverError(msg) {
+        } catch AnisetteHeadersProvider.AnisetteError.serverError(let msg) {
             testResult = .failure(msg)
         } catch AnisetteHeadersProvider.AnisetteError.serverNotConfigured {
             testResult = .failure("No URL configured. Enter one above and tap Save.")
