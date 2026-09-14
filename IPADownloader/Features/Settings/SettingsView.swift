@@ -9,7 +9,7 @@ struct SettingsView: View {
     @State private var testResult: TestResult?
 
     enum TestResult {
-        case success(receivedKeys: [String])
+        case success(receivedKeys: [String: String])
         case failure(String)
     }
 
@@ -72,17 +72,31 @@ struct SettingsView: View {
 
                     if let result = testResult {
                         switch result {
-                        case .success(let keys):
+                        case .success(let headers):
                             VStack(alignment: .leading, spacing: 4) {
                                 Label("OK — server reachable", systemImage: "checkmark.circle.fill")
                                     .foregroundColor(.green)
-                                Text("Received \(keys.count) headers:")
+                                Text("Received \(headers.count) headers")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
-                                ForEach(keys, id: \.self) { key in
-                                    Text("• \(key)")
+                                // Show the device fingerprint that Apple will see.
+                                // If you run Test Connection twice and X-Mme-Device-Id
+                                // is the SAME both times, the anisette server is using
+                                // a single static device — Apple may rate-limit / 503
+                                // it after a few logins. To rotate, restart the
+                                // anisette container (it generates a new device on
+                                // first boot, or use the v3 provisioning endpoint).
+                                if let devId = headers["X-Mme-Device-Id"] {
+                                    Text("Device-Id: \(devId)")
                                         .font(.caption2.monospaced())
                                         .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                if let clientInfo = headers["X-MMe-Client-Info"] {
+                                    Text("Client: \(clientInfo)")
+                                        .font(.caption2.monospaced())
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
                                 }
                             }
                         case .failure(let msg):
@@ -153,7 +167,7 @@ struct SettingsView: View {
             let required = ["X-Apple-I-MD", "X-Apple-I-MD-M", "X-Mme-Device-Id"]
             let missing = required.filter { headers[$0] == nil }
             if missing.isEmpty {
-                testResult = .success(receivedKeys: received)
+                testResult = .success(receivedKeys: headers)
             } else {
                 testResult = .failure("""
                     Server returned \(received.count) keys but is missing required ones:

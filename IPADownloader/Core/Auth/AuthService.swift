@@ -51,11 +51,26 @@ final class AuthService: ObservableObject {
 
     func login(appleId: String, password: String) async {
         state = .initiating
-        do {
-            try await performSRPLogin(appleId: appleId, password: password)
-        } catch {
-            state = .failed(error.localizedDescription)
+        // Apple GSA occasionally returns 503 Service Temporarily Unavailable
+        // for transient reasons (rate-limit, IP reputation, server load).
+        // Retry up to 3 times with backoff before giving up.
+        var lastErr: Error?
+        for attempt in 1...3 {
+            do {
+                try await performSRPLogin(appleId: appleId, password: password)
+                return // success — state already set inside performSRPLogin
+            } catch {
+                lastErr = error
+                // Only retry on transient errors (503 from Apple, network timeouts).
+                let msg = (error as NSError).localizedDescription.lowercased()
+                let isTransient = msg.contains("503")
+                                || msg.contains("timeout")
+                                || msg.contains("temporarily unavailable")
+                if !isTransient || attempt == 3 { break }
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+            }
         }
+        state = .failed(lastErr?.localizedDescription ?? "Unknown error")
     }
 
     private func performSRPLogin(appleId: String, password: String) async throws {
