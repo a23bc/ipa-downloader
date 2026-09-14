@@ -27,18 +27,28 @@ final class AnisetteHeadersProvider: ObservableObject {
     /// Used by the Settings "Test Connection" button to show the user exactly
     /// which URL the app is hitting.
     var effectiveRequestURL: URL? {
-        serverURL?.appendingPathComponent("v3_anisette")
+        serverURL?.appendingPathComponent("")
     }
 
     /// Fetch fresh anisette headers from the sidecar server.
     /// Returns a `[String: String]` ready to be merged into a `URLRequest`.
+    ///
+    /// Supports the v1 endpoint of Dadoum/anisette-v3-server: a plain GET to
+    /// the server root returns a JSON object with all required headers
+    /// (`X-Apple-I-MD`, `X-Apple-I-MD-M`, `X-Mme-Device-Id`, etc.).
     func fetchHeaders() async throws -> [String: String] {
         guard let baseURL = serverURL else {
             throw AnisetteError.serverNotConfigured
         }
-        let url = baseURL.appendingPathComponent("v3_anisette")
+        // Hit the v1 root endpoint (`GET /`). Dadoum/anisette-v3-server
+        // responds with the complete anisette header set as JSON.
+        let url = baseURL
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.timeoutInterval = 10
+            let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
                 throw AnisetteError.serverError(message: """
                     Response was not HTTP (got \(type(of: response))).
@@ -52,6 +62,10 @@ final class AnisetteHeadersProvider: ObservableObject {
                 throw AnisetteError.serverError(message: """
                     HTTP \(http.statusCode) from \(url.absoluteString)
                     Server returned: \(bodyPreview)
+
+                    Tip: this app expects Dadoum/anisette-v3-server, which
+                    serves anisette headers at GET / (v1 endpoint). If your
+                    server is a different implementation, the path may differ.
                     """)
             }
             guard let headers = try? JSONDecoder().decode([String: String].self, from: data) else {
@@ -64,14 +78,16 @@ final class AnisetteHeadersProvider: ObservableObject {
                     Expected keys: X-Apple-I-MD, X-Apple-I-MD-M, X-Mme-Device-Id
                     """)
             }
-            // Inject client time + UA.
+            // Inject client time + UA (these can be missing from the v1 response).
             var merged = headers
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime]
-            merged["X-Apple-I-Client-Time"] = formatter.string(from: Date())
-            merged["User-Agent"] = "Xcode"
+            if merged["X-Apple-I-Client-Time"] == nil {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                merged["X-Apple-I-Client-Time"] = formatter.string(from: Date())
+            }
+            merged["User-Agent"] = merged["User-Agent"] ?? "Xcode"
             merged["Accept"] = "*/*"
-            merged["Accept-Language"] = "en-us"
+            merged["Accept-Language"] = merged["Accept-Language"] ?? "en-us"
             return merged
         } catch let err as AnisetteError {
             throw err

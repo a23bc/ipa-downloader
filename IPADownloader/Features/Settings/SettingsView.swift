@@ -60,7 +60,7 @@ struct SettingsView: View {
                         SettingsRow(label: "Saved", value: currentURL.absoluteString)
                     }
                     if let reqURL = AnisetteHeadersProvider.shared.effectiveRequestURL {
-                        SettingsRow(label: "Tests", value: reqURL.absoluteString)
+                        SettingsRow(label: "Fetches", value: "GET \(reqURL.absoluteString)")
                     }
 
                     Button {
