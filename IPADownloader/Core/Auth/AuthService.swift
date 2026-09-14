@@ -73,19 +73,62 @@ final class AuthService: ObservableObject {
                                                   deviceID: deviceID)
         var initHeaders = anisetteHeaders
         initHeaders["Content-Type"] = "application/x-apple-plist"
+        initHeaders["Accept"] = "*/*"
+        initHeaders["Accept-Language"] = "en-us"
+        initHeaders["User-Agent"] = "com.apple.gsa.appleproduction [macOS,13.1,22C65,com.apple.gsa.appleproduction (1),com.apple.ASFoundation (1)]"
+
         let initReq = URLRequest(url: URL(string: "https://gsa.apple.com/grandslam/GsService2")!)
             .appendingHeaders(initHeaders)
             .withBody(initBody, method: "POST")
-        let (initData, _) = try await URLSession.shared.data(for: initReq)
+        let (initData, initResp) = try await URLSession.shared.data(for: initReq)
 
         // Parse Init response to extract `sp` (salt) and `B`.
-        guard let plist = try PropertyListSerialization.propertyList(
-            from: initData, options: [], format: nil) as? [String: Any],
-              let sp = plist["sp"] as? String,
+        // If the response isn't a plist, surface what Apple actually returned
+        // so we can diagnose — the "isn't in the correct format" error
+        // typically means Apple returned an HTML error page or JSON status
+        // instead of the expected binary plist.
+        guard let initHTTP = initResp as? HTTPURLResponse else {
+            throw AuthError.invalidInitResponse("init: non-HTTP response")
+        }
+        guard let initPlist = try? PropertyListSerialization.propertyList(
+            from: initData, options: [], format: nil) as? [String: Any] else {
+            let bodyPreview = String(data: initData.prefix(500), encoding: .utf8) ?? "<binary \(initData.count) bytes>"
+            throw AuthError.invalidInitResponse("""
+                init: HTTP \(initHTTP.statusCode), response was not a plist.
+
+                Content-Type: \(initHTTP.value(forHTTPHeaderField: "Content-Type") ?? "<none>")
+
+                Body preview: \(bodyPreview)
+
+                Common causes:
+                • Anisette headers rejected by Apple (clock skew, wrong device ID format)
+                • Apple ID locked / requires verification
+                • Carrier-grade NAT or HTTPS interception (try VPN)
+                • Apple rate-limiting this device
+                """)
+        }
+
+        // Apple returns status=0 in the plist body for errors but HTTP 200; check both.
+        if let status = initPlist["Status"] as? [String: Any],
+           let ec = status["ec"] as? Int, ec != 0 {
+            let errorMessage = status["errors"] as? [[String: Any]] ?? []
+            let msgs = errorMessage.compactMap { ($0["title"] as? String) ?? ($0["message"] as? String) }
+            throw AuthError.invalidInitResponse("""
+                init: Apple returned status ec=\(ec)
+                Errors: \(msgs.joined(separator: "; "))
+                Full plist keys: \(initPlist.keys.sorted())
+                """)
+        }
+
+        guard let sp = initPlist["sp"] as? String,
               let saltData = Data(base64Encoded: sp),
-              let B64 = plist["B"] as? String,
+              let B64 = initPlist["B"] as? String,
               let BData = Data(base64Encoded: B64) else {
-            throw AuthError.invalidInitResponse
+            throw AuthError.invalidInitResponse("""
+                init: plist did not contain 'sp' and 'B'.
+                Received keys: \(initPlist.keys.sorted())
+                Full plist: \(initPlist)
+                """)
         }
         let B = BigUInt(bigEndian: BData)
 
@@ -104,14 +147,40 @@ final class AuthService: ObservableObject {
         )
         var completeHeaders = anisetteHeaders
         completeHeaders["Content-Type"] = "application/x-apple-plist"
+        completeHeaders["Accept"] = "*/*"
+        completeHeaders["Accept-Language"] = "en-us"
+        completeHeaders["User-Agent"] = "com.apple.gsa.appleproduction [macOS,13.1,22C65,com.apple.gsa.appleproduction (1),com.apple.ASFoundation (1)]"
+
         let completeReq = URLRequest(url: URL(string: "https://gsa.apple.com/grandslam/GsService2")!)
             .appendingHeaders(completeHeaders)
             .withBody(completeBody, method: "POST")
         let (completeData, completeResp) = try await URLSession.shared.data(for: completeReq)
 
-        guard let completePlist = try PropertyListSerialization.propertyList(
+        guard let completeHTTP = completeResp as? HTTPURLResponse else {
+            throw AuthError.invalidCompleteResponse("complete: non-HTTP response")
+        }
+        guard let completePlist = try? PropertyListSerialization.propertyList(
             from: completeData, options: [], format: nil) as? [String: Any] else {
-            throw AuthError.invalidCompleteResponse
+            let bodyPreview = String(data: completeData.prefix(500), encoding: .utf8) ?? "<binary \(completeData.count) bytes>"
+            throw AuthError.invalidCompleteResponse("""
+                complete: HTTP \(completeHTTP.statusCode), response was not a plist.
+
+                Content-Type: \(completeHTTP.value(forHTTPHeaderField: "Content-Type") ?? "<none>")
+
+                Body preview: \(bodyPreview)
+                """)
+        }
+
+        // Check for in-plist error status.
+        if let status = completePlist["Status"] as? [String: Any],
+           let ec = status["ec"] as? Int, ec != 0 {
+            let errorMessage = status["errors"] as? [[String: Any]] ?? []
+            let msgs = errorMessage.compactMap { ($0["title"] as? String) ?? ($0["message"] as? String) }
+            throw AuthError.invalidCompleteResponse("""
+                complete: Apple returned status ec=\(ec)
+                Errors: \(msgs.joined(separator: "; "))
+                Full plist keys: \(completePlist.keys.sorted())
+                """)
         }
 
         // 2FA required?
@@ -132,7 +201,11 @@ final class AuthService: ObservableObject {
         // Otherwise — attempt to extract spd (decrypted with K) and authToken.
         guard let spd64 = completePlist["spd"] as? String,
               let spdCipher = Data(base64Encoded: spd64) else {
-            throw AuthError.invalidCompleteResponse
+            throw AuthError.invalidCompleteResponse("""
+                complete: plist did not contain 'spd' key.
+                Received keys: \(completePlist.keys.sorted())
+                Full plist: \(completePlist)
+                """)
         }
         // spd is encrypted with key derived from K via PBKDF2 (HMAC-SHA1).
         // The protocol expects HMAC-SHA256-based key derivation, but Apple uses
@@ -145,14 +218,14 @@ final class AuthService: ObservableObject {
         ) ?? Data(repeating: 0, count: 16)
 
         guard let decryptedSPD = aesDecrypt(key: derivedKey, data: spdCipher) else {
-            throw AuthError.invalidCompleteResponse
+            throw AuthError.invalidCompleteResponse("complete: failed to decrypt spd blob (AES key derivation may be wrong)")
         }
 
         // Parse SPD for GUID / DSID / passToken.
         // SPD is a binary plist embedded in the encrypted blob.
         guard let spdPlist = try? PropertyListSerialization.propertyList(
             from: decryptedSPD, options: [], format: nil) as? [String: Any] else {
-            throw AuthError.invalidCompleteResponse
+            throw AuthError.invalidCompleteResponse("complete: decrypted spd was not a plist (\(decryptedSPD.count) bytes)")
         }
 
         let guid = spdPlist["GUID"] as? String
@@ -252,14 +325,14 @@ final class AuthService: ObservableObject {
     }
 
     enum AuthError: Error, LocalizedError {
-        case invalidInitResponse
-        case invalidCompleteResponse
+        case invalidInitResponse(String)
+        case invalidCompleteResponse(String)
         case invalid2FAResponse
 
         var errorDescription: String? {
             switch self {
-            case .invalidInitResponse: return "Server returned invalid SRP init response"
-            case .invalidCompleteResponse: return "Server returned invalid auth-complete response"
+            case .invalidInitResponse(let msg): return msg
+            case .invalidCompleteResponse(let msg): return msg
             case .invalid2FAResponse: return "Server returned invalid 2FA response"
             }
         }

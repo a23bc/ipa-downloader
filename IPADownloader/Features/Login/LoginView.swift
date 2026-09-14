@@ -53,7 +53,12 @@ struct LoginView: View {
                     }
 
                     if case .failed(let msg) = auth.state {
-                        Section { Text(msg).foregroundColor(.red) }
+                        Section {
+                            Text(msg)
+                                .foregroundColor(.red)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                        }
                     }
                 }
 
