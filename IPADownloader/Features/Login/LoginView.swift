@@ -9,6 +9,7 @@ struct LoginView: View {
     @State private var password = ""
     @State private var twoFactorCode = ""
     @State private var passwordVisible = false
+    @State private var showingSettings = false
 
     var body: some View {
         NavigationView {
@@ -64,6 +65,26 @@ struct LoginView: View {
             }
             .navigationTitle("Sign In")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .sheet(isPresented: $showingSettings) {
+                NavigationView {
+                    SettingsView()
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button("Done") { showingSettings = false }
+                            }
+                        }
+                }
+            }
         }
     }
 
@@ -81,6 +102,29 @@ struct LoginView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+
+            // First-run hint: if the anisette server URL isn't set yet, point
+            // users to the Settings sheet (gear button, top-right) before they
+            // can successfully sign in.
+            if AnisetteHeadersProvider.shared.serverURL == nil {
+                Button {
+                    showingSettings = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("Configure Anisette Server in Settings before signing in")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.top, 24)
     }

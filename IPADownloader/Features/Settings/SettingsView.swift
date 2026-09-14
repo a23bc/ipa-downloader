@@ -39,6 +39,23 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(anisetteURLString.isEmpty)
+
+                    if let currentURL = AnisetteHeadersProvider.shared.serverURL {
+                        SettingsRow(label: "Current", value: currentURL.absoluteString)
+                    }
+
+                    // Quick-link to the anisette-v3-server project for the user
+                    // to learn how to obtain / run it on-device.
+                    Link(destination: URL(string: "https://github.com/Dadoum/anisette-v3-server")!) {
+                        HStack {
+                            Image(systemName: "link.circle")
+                                .foregroundColor(.accentColor)
+                            Text("Get anisette-v3-server →")
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
 
                 Section(header: Text("iTunes Key")) {
