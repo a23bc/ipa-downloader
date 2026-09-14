@@ -6,6 +6,12 @@ struct SettingsView: View {
 
     @State private var anisetteURLString: String = ""
     @State private var showLogoutConfirm = false
+    @State private var testResult: TestResult?
+
+    enum TestResult {
+        case success(receivedKeys: [String])
+        case failure(String)
+    }
 
     var body: some View {
         NavigationView {
@@ -28,32 +34,66 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("Anisette Server"),
-                        footer: Text("Run a local anisette-v3-server on your device, then enter its URL here. Without it, Apple ID login will fail.")) {
-                    TextField("http://127.0.0.1:6969", text: $anisetteURLString)
+                        footer: Text("""
+                            Run a local anisette-v3-server on your device or PC, then enter its URL here. \
+                            Without it, Apple ID login will fail.
+
+                            ⚠️ If the server is on your PC, do NOT use 127.0.0.1 — that's loopback on \
+                            the iOS device. Use your PC's LAN IP, e.g. http://192.168.1.10:6969
+
+                            Make sure Docker publishes the port: docker run -p 6969:6969 ...
+                            And that the Windows Firewall allows inbound TCP to port 6969.
+                            """)) {
+                    TextField("http://192.168.1.10:6969", text: $anisetteURLString)
                         .keyboardType(.URL)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
                     Button("Save") {
                         if let url = URL(string: anisetteURLString) {
                             AnisetteHeadersProvider.shared.serverURL = url
+                            testResult = nil
                         }
                     }
                     .disabled(anisetteURLString.isEmpty)
 
                     if let currentURL = AnisetteHeadersProvider.shared.serverURL {
-                        SettingsRow(label: "Current", value: currentURL.absoluteString)
+                        SettingsRow(label: "Saved", value: currentURL.absoluteString)
+                    }
+                    if let reqURL = AnisetteHeadersProvider.shared.effectiveRequestURL {
+                        SettingsRow(label: "Tests", value: reqURL.absoluteString)
                     }
 
-                    // Quick-link to the anisette-v3-server project for the user
-                    // to learn how to obtain / run it on-device.
-                    Link(destination: URL(string: "https://github.com/Dadoum/anisette-v3-server")!) {
-                        HStack {
-                            Image(systemName: "link.circle")
-                                .foregroundColor(.accentColor)
-                            Text("Get anisette-v3-server →")
-                            Spacer()
-                            Image(systemName: "arrow.up.right.square")
-                                .foregroundColor(.secondary)
+                    Button {
+                        Task { await runAnisetteTest() }
+                    } label: {
+                        Label("Test Connection", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                    .disabled(AnisetteHeadersProvider.shared.serverURL == nil)
+
+                    if let result = testResult {
+                        switch result {
+                        case .success(let keys):
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("OK — server reachable", systemImage: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("Received \(keys.count) headers:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                ForEach(keys, id: \.self) { key in
+                                    Text("• \(key)")
+                                        .font(.caption2.monospaced())
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        case .failure(let msg):
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("Failed", systemImage: "xmark.octagon.fill")
+                                    .foregroundColor(.red)
+                                Text(msg)
+                                    .font(.caption.monospaced())
+                                    .foregroundColor(.red)
+                                    .textSelection(.enabled)
+                            }
                         }
                     }
                 }
@@ -99,6 +139,35 @@ struct SettingsView: View {
                 Button("Sign Out", role: .destructive) { auth.logout() }
                 Button("Cancel", role: .cancel) {}
             }
+        }
+    }
+
+    /// Trigger an explicit fetch against the configured anisette server
+    /// and surface the outcome in the UI. Used by the "Test Connection" button.
+    private func runAnisetteTest() async {
+        testResult = nil
+        do {
+            let headers = try await AnisetteHeadersProvider.shared.fetchHeaders()
+            let received = headers.keys.sorted()
+            // Sanity-check: confirm the critical keys arrived.
+            let required = ["X-Apple-I-MD", "X-Apple-I-MD-M", "X-Mme-Device-Id"]
+            let missing = required.filter { headers[$0] == nil }
+            if missing.isEmpty {
+                testResult = .success(receivedKeys: received)
+            } else {
+                testResult = .failure("""
+                    Server returned \(received.count) keys but is missing required ones:
+                    \(missing.joined(separator: ", "))
+
+                    Got: \(received.joined(separator: ", "))
+                    """)
+            }
+        } catch let AnisetteHeadersProvider.AnisetteError.serverError(msg) {
+            testResult = .failure(msg)
+        } catch AnisetteHeadersProvider.AnisetteError.serverNotConfigured {
+            testResult = .failure("No URL configured. Enter one above and tap Save.")
+        } catch {
+            testResult = .failure("Unexpected error: \(error.localizedDescription)")
         }
     }
 }
