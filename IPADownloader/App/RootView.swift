@@ -8,7 +8,7 @@ struct RootView: View {
     var body: some View {
         Group {
             switch auth.state {
-            case .idle, .initiating, .failed, .awaiting2FA:
+            case .idle, .authenticating, .failed, .awaiting2FA:
                 LoginView()
                     .transition(.opacity)
             case .authenticated:

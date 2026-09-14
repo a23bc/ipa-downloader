@@ -41,11 +41,9 @@ struct LoginView: View {
                         }
                     }
 
-                    if case .awaiting2FA(let phones) = auth.state {
+                    if case .awaiting2FA = auth.state {
                         Section(header: Text("Two-Factor Code"),
-                                footer: Text(phones.isEmpty
-                                             ? "Enter the code shown on your trusted Apple device."
-                                             : "Trusted phone numbers: \(phones.joined(separator: ", "))")) {
+                                footer: Text("Enter the code shown on your trusted Apple device or sent via SMS.")) {
                             TextField("6 digits", text: $twoFactorCode)
                                 .keyboardType(.numberPad)
                                 .textContentType(.oneTimeCode)
@@ -146,7 +144,7 @@ struct LoginView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(twoFactorCode.count < 6)
-            } else if auth.state == .initiating {
+            } else if auth.state == .authenticating {
                 ProgressView("Authenticating…")
                     .frame(maxWidth: .infinity)
             } else {
