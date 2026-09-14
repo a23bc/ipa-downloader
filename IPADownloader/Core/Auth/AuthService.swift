@@ -1,4 +1,5 @@
 import Foundation
+import CommonCrypto
 
 /// High-level authentication service orchestrating the SRP-6a flow and 2FA.
 ///
@@ -185,7 +186,7 @@ final class AuthService: ObservableObject {
 
     func submit2FACode(_ code: String) async {
         guard let scnt = lastSCNT,
-              let account = account,
+              var account = account,
               let anisetteHeaders = try? await anisette.fetchHeaders() else {
             state = .failed("Anisette headers missing — configure in Settings.")
             return

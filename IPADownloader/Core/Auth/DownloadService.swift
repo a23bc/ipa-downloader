@@ -85,7 +85,10 @@ final class DownloadService: ObservableObject {
             while true {
                 let end = offset + chunkSize - 1
                 let chunkReq = DownloadChunkEndpoint(url: url, range: (offset, end)).urlRequest
-                let (data, httpResp) = try await URLSession.shared.data(for: chunkReq)
+                let (data, resp) = try await URLSession.shared.data(for: chunkReq)
+                guard let httpResp = resp as? HTTPURLResponse else {
+                    throw DownloadError.downloadFailed(status: -1)
+                }
                 if httpResp.statusCode == 416 { break } // Range Not Satisfiable → done
                 guard (200...206).contains(httpResp.statusCode) else {
                     throw DownloadError.downloadFailed(status: httpResp.statusCode)

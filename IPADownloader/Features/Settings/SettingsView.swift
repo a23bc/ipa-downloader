@@ -13,9 +13,9 @@ struct SettingsView: View {
                 Section(header: Text("Account"),
                         footer: Text("Your password is stored in the iOS Keychain; it never leaves this device.")) {
                     if let acct = auth.account {
-                        LabeledContent("Apple ID", value: acct.appleId)
+                        SettingsRow(label: "Apple ID", value: acct.appleId)
                         if acct.dsid != nil {
-                            LabeledContent("Status", value: "Signed In")
+                            SettingsRow(label: "Status", value: "Signed In")
                         }
                         Button(role: .destructive) {
                             showLogoutConfirm = true
@@ -55,14 +55,20 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("Storage")) {
-                    LabeledContent("Downloads Dir", value: IPAFileManager.downloadsDirectory.lastPathComponent)
+                    SettingsRow(label: "Downloads Dir", value: IPAFileManager.downloadsDirectory.lastPathComponent)
                 }
 
                 Section(header: Text("About")) {
-                    LabeledContent("Version", value: "1.0.0")
-                    LabeledContent("Min iOS", value: "15.0")
-                    Link("Based on ipatool",
-                         destination: URL(string: "https://github.com/majd/ipatool")!)
+                    SettingsRow(label: "Version", value: "1.0.0")
+                    SettingsRow(label: "Min iOS", value: "15.0")
+                    Link(destination: URL(string: "https://github.com/majd/ipatool")!) {
+                        HStack {
+                            Text("Based on ipatool")
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -76,6 +82,23 @@ struct SettingsView: View {
                 Button("Sign Out", role: .destructive) { auth.logout() }
                 Button("Cancel", role: .cancel) {}
             }
+        }
+    }
+}
+
+/// iOS-15 compatible replacement for `LabeledContent` (which is iOS 16+).
+struct SettingsRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 }

@@ -9,20 +9,29 @@ import Foundation
 /// number; a single `pow` is ~2k modular multiplications, which is fast
 /// enough (< 200ms on an iPhone 8) since the entire computation runs once per
 /// authentication.
-struct BigUInt {
+struct BigUInt: Equatable, Comparable, ExpressibleByIntegerLiteral {
     /// Limbs, little-endian: `limbs[0]` is the least-significant 32 bits.
     /// Trailing zero limbs are stripped on construction.
     private(set) var limbs: [UInt32]
 
-    init(_ limbs: [UInt32]) {
+    init(limbs: [UInt32]) {
         var l = limbs
         while l.count > 1 && l.last == 0 { l.removeLast() }
         self.limbs = l
     }
 
-    init(_ value: UInt32) { self.init([value]) }
+    init(_ value: UInt32) { self.init(limbs: [value]) }
     init(_ value: UInt64) {
-        self.init([UInt32(value & 0xFFFFFFFF), UInt32(value >> 32)])
+        self.init(limbs: [UInt32(value & 0xFFFFFFFF), UInt32(value >> 32)])
+    }
+
+    /// `ExpressibleByIntegerLiteral` — picks this path for `BigUInt(0)` etc.,
+    /// removing the ambiguity between the `UInt32` and `UInt64` inits above.
+    init(integerLiteral value: Int) {
+        precondition(value >= 0, "BigUInt cannot represent negative values")
+        // Split a 64-bit signed Int into limbs (handles the typical case).
+        let magnitude = UInt64(value)
+        self.init(limbs: [UInt32(magnitude & 0xFFFFFFFF), UInt32(magnitude >> 32)])
     }
 
     /// Initialize from a big-endian `Data` buffer (the conventional format for
@@ -42,7 +51,7 @@ struct BigUInt {
                    |  UInt32(bytes[i + 3])
             limbs.append(v)
         }
-        self.init(limbs.reversed())
+        self.init(limbs: limbs.reversed())
     }
 
     /// Big-endian `Data` representation (what gets sent over the wire).
@@ -96,7 +105,7 @@ struct BigUInt {
             carry = sum >> 32
         }
         if carry > 0 { result.append(UInt32(carry)) }
-        return BigUInt(result)
+        return BigUInt(limbs: result)
     }
 
     static func - (lhs: BigUInt, rhs: BigUInt) -> BigUInt {
@@ -115,13 +124,13 @@ struct BigUInt {
             }
             result[i] = UInt32(diff & 0xFFFFFFFF)
         }
-        return BigUInt(result)
+        return BigUInt(limbs: result)
     }
 
     // MARK: - Multiplication
 
     static func * (lhs: BigUInt, rhs: BigUInt) -> BigUInt {
-        if lhs.isZero || rhs.isZero { return BigUInt(0) }
+        if lhs.isZero || rhs.isZero { return BigUInt(limbs: [0]) }
         var result = [UInt32](repeating: 0, count: lhs.limbs.count + rhs.limbs.count)
         for i in 0..<lhs.limbs.count {
             var carry: UInt64 = 0
@@ -134,7 +143,7 @@ struct BigUInt {
             }
             if carry > 0 { result[i + rhs.limbs.count] += UInt32(carry) }
         }
-        return BigUInt(result)
+        return BigUInt(limbs: result)
     }
 
     // MARK: - Bit shifts
@@ -156,7 +165,7 @@ struct BigUInt {
             }
             if carry > 0 { newLimbs.append(carry) }
         }
-        return BigUInt(newLimbs)
+        return BigUInt(limbs: newLimbs)
     }
 
     static func >> (lhs: BigUInt, rhs: Int) -> BigUInt {
@@ -164,7 +173,7 @@ struct BigUInt {
         if rhs == 0 { return lhs }
         let limbShift = rhs / 32
         let bitShift = rhs % 32
-        if limbShift >= lhs.limbs.count { return BigUInt(0) }
+        if limbShift >= lhs.limbs.count { return BigUInt(limbs: [0]) }
         var newLimbs = Array(lhs.limbs[limbShift...])
         if bitShift != 0 {
             var carry: UInt32 = 0
@@ -174,7 +183,7 @@ struct BigUInt {
                 carry = v << (32 - bitShift)
             }
         }
-        return BigUInt(newLimbs)
+        return BigUInt(limbs: newLimbs)
     }
 
     // MARK: - Modulo
@@ -183,10 +192,10 @@ struct BigUInt {
     func mod(_ m: BigUInt) -> BigUInt {
         precondition(!m.isZero)
         if self < m { return self }
-        var r = BigUInt(0)
+        var r = BigUInt(limbs: [0])
         for i in (0..<bitWidth).reversed() {
             r = r << 1
-            if bit(at: i) { r = r + BigUInt(1) }
+            if bit(at: i) { r = r + BigUInt(limbs: [1]) }
             if r >= m { r = r - m }
         }
         return r
@@ -204,16 +213,15 @@ struct BigUInt {
 
     /// `self^exp mod m` via square-and-multiply.
     func powMod(_ exp: BigUInt, _ m: BigUInt) -> BigUInt {
-        var result = BigUInt(1)
+        var result: BigUInt = 1
         var base = self.mod(m)
         var e = exp
-        let one = BigUInt(1)
-        while e > BigUInt(0) {
+        while e > 0 {
             if (e.limbs[0] & 1) == 1 {
                 result = (result * base).mod(m)
             }
             e = e >> 1
-            if e > BigUInt(0) {
+            if e > 0 {
                 base = (base * base).mod(m)
             }
         }
@@ -223,18 +231,16 @@ struct BigUInt {
     /// Modular inverse via extended Euclidean algorithm.
     /// Returns `x` such that `self * x ≡ 1 (mod m)`.
     func modInverse(_ m: BigUInt) -> BigUInt? {
-        // Extended GCD with signed magnitudes.
         var (old_r, r) = (self.mod(m), m)
-        var (old_s, s): (BigInt, BigInt) = (BigInt(sign: .plus, magnitude: BigUInt(1)),
-                                            BigInt(sign: .plus, magnitude: BigUInt(0)))
+        var (old_s, s): (BigInt, BigInt) = (BigInt(sign: .plus, magnitude: 1),
+                                            BigInt(sign: .plus, magnitude: 0))
         while !r.isZero {
             let q = old_r.div(r)
             (old_r, r) = (r, old_r - q * r)
             (old_s, s) = (s, old_s - BigInt(sign: .plus, magnitude: q) * s)
         }
-        if old_r != BigUInt(1) { return nil }
+        if old_r != 1 { return nil }
         if old_s.sign == .minus {
-            // Add m to make positive.
             return (BigInt(sign: .plus, magnitude: m) + old_s).magnitude
         }
         return old_s.magnitude.mod(m)
@@ -244,22 +250,21 @@ struct BigUInt {
     /// since `mod` already produces it; this is only used inside `modInverse`).
     fileprivate func div(_ divisor: BigUInt) -> BigUInt {
         precondition(!divisor.isZero)
-        if self < divisor { return BigUInt(0) }
-        var q = BigUInt(0)
-        var r = BigUInt(0)
+        if self < divisor { return BigUInt(limbs: [0]) }
+        var q: BigUInt = 0
+        var r: BigUInt = 0
         for i in (0..<bitWidth).reversed() {
             r = r << 1
-            if bit(at: i) { r = r + BigUInt(1) }
+            if bit(at: i) { r = r + BigUInt(limbs: [1]) }
             if r >= divisor {
                 r = r - divisor
-                // Set bit i in q.
                 let limb = i / 32
                 let off = i % 32
                 while q.limbs.count <= limb { q.limbs.append(0) }
                 q.limbs[limb] |= UInt32(1 << off)
             }
         }
-        return BigUInt(q.limbs)
+        return BigUInt(limbs: q.limbs)
     }
 }
 
@@ -287,5 +292,9 @@ fileprivate struct BigInt: Equatable {
     static func * (lhs: BigInt, rhs: BigInt) -> BigInt {
         BigInt(sign: lhs.sign == rhs.sign ? .plus : .minus,
                magnitude: lhs.magnitude * rhs.magnitude)
+    }
+
+    static func == (lhs: BigInt, rhs: BigInt) -> Bool {
+        lhs.sign == rhs.sign && lhs.magnitude == rhs.magnitude
     }
 }

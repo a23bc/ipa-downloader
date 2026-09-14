@@ -49,7 +49,7 @@ struct SearchView: View {
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
             if !query.isEmpty {
-                Button { query = ""; search.results = [] } label: {
+                Button { query = ""; search.clear() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
                 }

@@ -35,4 +35,11 @@ final class SearchService: ObservableObject {
         let resp = try await http.send(LookupEndpoint(bundleId: bundleId, country: country))
         return resp.results.first
     }
+
+    /// Reset the search state (called from the UI when the user clears the query).
+    func clear() {
+        results = []
+        error = nil
+        isLoading = false
+    }
 }

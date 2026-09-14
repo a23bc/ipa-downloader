@@ -5,7 +5,7 @@ final class BigUIntTests: XCTestCase {
     func testAdditionSmall() {
         XCTAssertEqual((BigUInt(3) + BigUInt(5)), BigUInt(8))
         XCTAssertEqual((BigUInt(UInt64(0xFFFFFFFF) + 1) + BigUInt(1)),
-                       BigUInt([0x00000001, 0x00000001]))
+                       BigUInt(limbs: [0x00000001, 0x00000001]))
     }
 
     func testSubtractionSmall() {
