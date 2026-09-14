@@ -105,6 +105,28 @@ final class AuthService: ObservableObject {
         guard let initHTTP = initResp as? HTTPURLResponse else {
             throw AuthError.invalidInitResponse("init: non-HTTP response")
         }
+
+        // If Apple returns 503 (Service Temporarily Unavailable), the response
+        // is HTML — not a plist. Surface this distinctly from real parse errors.
+        if initHTTP.statusCode == 503 {
+            throw AuthError.invalidInitResponse("""
+                init: HTTP 503 — Apple refused the request.
+
+                Body sent: \(initBody.count) bytes (binary plist).
+                Anisette headers sent: \(anisetteHeaders.keys.sorted().joined(separator: ", "))
+                X-Mme-Device-Id: \(deviceID)
+
+                If this persists after retrying and changing network:
+                • Your anisette device fingerprint may be flagged by Apple.
+                  Try a freshly-provisioned anisette server (delete its data volume).
+                • Your Apple ID may require verification on appleid.apple.com.
+                • Apple may be rate-limiting this IP. Wait 10-30 min and retry.
+                • If you've never successfully authenticated from this anisette
+                  server before, it may need a longer first-run provisioning
+                  (the server logs should say 'provisioning' the first time).
+                """)
+        }
+
         guard let initPlist = try? PropertyListSerialization.propertyList(
             from: initData, options: [], format: nil) as? [String: Any] else {
             let bodyPreview = String(data: initData.prefix(500), encoding: .utf8) ?? "<binary \(initData.count) bytes>"
@@ -114,12 +136,6 @@ final class AuthService: ObservableObject {
                 Content-Type: \(initHTTP.value(forHTTPHeaderField: "Content-Type") ?? "<none>")
 
                 Body preview: \(bodyPreview)
-
-                Common causes:
-                • Anisette headers rejected by Apple (clock skew, wrong device ID format)
-                • Apple ID locked / requires verification
-                • Carrier-grade NAT or HTTPS interception (try VPN)
-                • Apple rate-limiting this device
                 """)
         }
 
