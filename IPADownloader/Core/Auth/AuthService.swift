@@ -168,8 +168,7 @@ final class AuthService: ObservableObject {
             username: appleId,
             password: password,
             salt: saltData,
-            B: B,
-            deviceID: deviceID
+            B: B
         )
 
         // Step 5: Send Complete request.
