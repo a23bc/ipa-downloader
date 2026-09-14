@@ -11,24 +11,42 @@ on:
 jobs:
   build:
     name: Build unsigned IPA
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+      - name: List available Xcodes
+        run: ls /Applications | grep -i xcode
+
+      - name: Select latest Xcode 16
+        run: |
+          set -ex
+          # Find the highest-versioned Xcode 16.x installed on the runner.
+          LATEST=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST" ]; then
+            echo "::error::No Xcode 16.x found on runner"
+            exit 1
+          fi
+          echo "Using: $LATEST"
+          sudo xcode-select -s "$LATEST/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | head -20
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          brew update
+          brew install xcodegen
+          xcodegen --version
 
       - name: Generate .xcodeproj
         run: xcodegen generate
         working-directory: ${{ github.workspace }}
 
-      - name: Show project
+      - name: Sanity-check project object version
         run: |
-          ls -la
+          set -ex
+          grep -E "objectVersion" IPADownloader.xcodeproj/project.pbxproj || true
           ls -la IPADownloader.xcodeproj
 
       - name: Build .app (no code signing)
@@ -50,6 +68,10 @@ jobs:
         id: locate
         run: |
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "IPADownloader.app" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::IPADownloader.app not found in DerivedData"
+            exit 1
+          fi
           echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
           echo "Found app at: $APP_PATH"
 

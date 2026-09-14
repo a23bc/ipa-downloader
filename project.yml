@@ -5,6 +5,11 @@ options:
     iOS: "15.0"
   createIntermediateGroups: true
   developmentLanguage: en
+  # Pin the project objectVersion so the generated .pbxproj is compatible with
+  # the Xcode version selected by the GitHub Actions runner (Xcode 16.x).
+  # Without this, xcodegen emits objectVersion=77 by default, which Xcode 15
+  # cannot open. Set this to match the Xcode you actually build with.
+  xcodeVersion: "16.0"
 settings:
   base:
     SWIFT_VERSION: "5.9"
